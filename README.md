@@ -1,6 +1,10 @@
 # Slinky Containers
 
-[OCI] container images to support [Slinky], by [SchedMD].
+[SchedMD] provides the images in the containers repository primarily for use
+with [Slinky] - to enable the orchestration of [Slurm] clusters using
+[Kubernetes]. These [OCI] container images track [Slurm] releases closely.
+
+## Image Registries
 
 OCI artifacts are pushed to public registries:
 
@@ -9,17 +13,17 @@ OCI artifacts are pushed to public registries:
 ## Build Slurm Images
 
 ```sh
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 docker bake $BAKE_IMPORTS --print
 docker bake $BAKE_IMPORTS
 ```
 
-For example, the following will build Slurm 25.05 on Rocky Linux 9.
+For example, the following will build Slurm 25.11 on Rocky Linux 9.
 
 ```sh
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./25.05/rockylinux9/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./25.11/rockylinux9/slurm.hcl"
 docker bake $BAKE_IMPORTS --print
 docker bake $BAKE_IMPORTS
 ```
@@ -55,6 +59,8 @@ specific language governing permissions and limitations under the License.
 [build-guide]: ./docs/build.md
 [contact-schedmd]: https://www.schedmd.com/slurm-resources/contact-schedmd/
 [github-registry]: https://github.com/orgs/SlinkyProject/packages
+[kubernetes]: https://kubernetes.io/
 [oci]: https://opencontainers.org/
 [schedmd]: https://www.schedmd.com/
 [slinky]: https://slinky.ai/
+[slurm]: https://slurm.schedmd.com/

@@ -5,6 +5,7 @@
 ################################################################################
 
 ARG SLURM_VERSION=master
+ARG SLURM_VERSION_MICRO=1
 ARG SLURM_DIR=slurm
 ARG PARENT_IMAGE=ubuntu:24.04
 
@@ -12,22 +13,20 @@ ARG PARENT_IMAGE=ubuntu:24.04
 FROM alpine:latest AS slurm-src
 
 ARG SLURM_VERSION
+ARG SLURM_VERSION_MICRO
 ARG SLURM_DIR
-ARG SLURM_TAR="${SLURM_VERSION}"
+ARG SLURM_TAR="${SLURM_VERSION}.tar.gz"
 
 WORKDIR /workspace/
 
-ADD https://github.com/SchedMD/slurm/archive/${SLURM_TAR}.tar.gz ${SLURM_VERSION}.tar.gz
+RUN apk add -q --no-cache tar
 
-RUN --mount=type=cache,target=/var/cache/apk,sharing=locked <<EOR
-# Unpack Slurm Source
-set -xeuo pipefail
-apk upgrade -q --update-cache
-apk add -q tar
-mkdir -p ${SLURM_DIR}
-tar --strip-components=1 -zxvf ${SLURM_TAR}.tar.gz -C ${SLURM_DIR}
-rm ${SLURM_TAR}.tar.gz
-EOR
+ADD https://github.com/SchedMD/slurm/archive/${SLURM_TAR} ${SLURM_TAR}
+
+RUN \
+  mkdir -p ${SLURM_DIR} && \
+  tar --strip-components=1 -zxvf ${SLURM_TAR} -C ${SLURM_DIR} && \
+  rm ${SLURM_TAR}
 
 ################################################################################
 FROM ${PARENT_IMAGE} AS build
@@ -43,6 +42,16 @@ ARG SLURM_DIR
 USER root
 WORKDIR /tmp/
 
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+# Pre-Build Slurm
+set -xeuo pipefail
+apt-get -qq update
+apt-get -qq -y upgrade
+apt-get -qq -y install --no-install-recommends \
+  build-essential apt-utils fakeroot devscripts equivs
+EOR
+
 COPY --from=slurm-src /workspace/${SLURM_DIR} ${SLURM_DIR}
 
 # Ref: https://slurm.schedmd.com/quickstart_admin.html#debuild
@@ -50,12 +59,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 # Build Slurm
 set -xeuo pipefail
-apt-get -qq update
-apt-get -qq -y upgrade
-apt-get -qq -y install --no-install-recommends \
-  build-essential fakeroot devscripts equivs
-## Build
-mk-build-deps -ir --tool='apt-get -qq -y -o Debug::pkgProblemResolver=yes --no-install-recommends' ${SLURM_DIR}/debian/control
+mk-build-deps -ir --tool='apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends' ${SLURM_DIR}/debian/control >/dev/null
 ( cd ${SLURM_DIR} && debuild -b -uc -us >/dev/null )
 EOR
 
@@ -155,7 +159,9 @@ EOR
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
   files/etc/supervisor/conf.d/slurmctld.conf \
+  files/etc/supervisor/conf.d/fakesystemd.conf \
   /etc/supervisor/conf.d/
+COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmctld-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 6817/tcp
@@ -179,6 +185,8 @@ set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   gawk socat \
+  openssh-server \
+  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss \
   ./slurm-smd-client_[0-9]*.deb \
   ./slurm-smd-client-dbgsym_[0-9]*.ddeb \
   ./slurm-smd-dev_[0-9]*.deb \
@@ -194,20 +202,24 @@ apt-get -qq -y install --no-install-recommends --fix-broken \
 rm *.deb && rm *.ddeb
 # Configure
 mkdir -p /var/spool/slurmd/
-cp -v /etc/nsswitch.conf{,.bak}
 sed -i -E "s/^passwd:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
 sed -i -E "s/^group:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
+mkdir -p /etc/authselect
+authselect select sssd with-mkhomedir --force
+rm -f /etc/ssh/ssh_host_*
 EOR
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
-  files/etc/supervisor/conf.d/slurmd.conf \
   files/etc/supervisor/conf.d/fakesystemd.conf \
+  files/etc/supervisor/conf.d/slurmd.conf \
+  files/etc/supervisor/conf.d/sshd.conf \
+  files/etc/supervisor/conf.d/sssd.conf \
   /etc/supervisor/conf.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
-EXPOSE 6818/tcp
+EXPOSE 6818/tcp 22/tcp
 ENTRYPOINT ["entrypoint.sh"]
 
 ################################################################################
@@ -321,7 +333,7 @@ EOR
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
   files/etc/supervisor/conf.d/sackd.conf \
-  files/etc/supervisor/conf.d/fakesystemd.conf \
+  files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
   /etc/supervisor/conf.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -347,9 +359,7 @@ apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
   socat \
   openssh-server \
-  dbus-daemon \
-  oddjob-mkhomedir \
-  authselect sssd sssd-ad sssd-ldap sssd-dbus libpam-sss libnss-sss
+  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss
 # Configure
 mkdir -p /etc/authselect
 authselect select sssd with-mkhomedir --force
@@ -358,9 +368,7 @@ EOR
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
-  files/etc/supervisor/conf.d/dbus.conf \
-  files/etc/supervisor/conf.d/fakesystemd.conf \
-  files/etc/supervisor/conf.d/oddjobd.conf \
+  files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
   files/etc/supervisor/conf.d/sackd.conf \
   files/etc/supervisor/conf.d/sshd.conf \
   files/etc/supervisor/conf.d/sssd.conf \

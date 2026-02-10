@@ -7,10 +7,17 @@ set -euo pipefail
 # Additional arguments to pass to slurmd.
 export SLURMD_OPTIONS="${SLURMD_OPTIONS:-} $*"
 
+# Additional arguments to pass to daemons.
+export SSHD_OPTIONS="${SSHD_OPTIONS:-}"
+export SSSD_OPTIONS="${SSSD_OPTIONS:-}"
+
+# Ref: https://slurm.schedmd.com/pam_slurm_adopt.html#OPTIONS
+export PAM_SLURM_ADOPT_OPTIONS="${PAM_SLURM_ADOPT_OPTIONS:-"action_adopt_failure=deny action_generic_failure=deny"}"
+
 # The asserted CPU resource limit of the pod.
 export POD_CPUS="${POD_CPUS:-0}"
 
-# The asserted memory resource limit (in MB) of the pod.
+# The asserted memory resource limit (in MiB) of the pod.
 export POD_MEMORY="${POD_MEMORY:-0}"
 
 # calculateCoreSpecCount returns a value for CoreSpecCount for the pod.
@@ -43,7 +50,7 @@ function calculateCoreSpecCount() {
 #
 # MemSpecLimit represents the amount of memory that the slurmd/slurmstepd
 # cannot use. Effectively it is the difference of the host and the pod's
-# resource limits. We have to convert memory to MB.
+# resource limits. Memory is in MiB (mebibytes) to match Slurm's internal units.
 #
 # Ref: https://slurm.schedmd.com/slurm.conf.html#OPT_MemSpecLimit
 function calculateMemSpecLimit() {
@@ -94,10 +101,34 @@ function addConfItem() {
 	export SLURMD_OPTIONS="${slurmdOptions[*]}"
 }
 
+# configure_pam_slurm configures PAM to use pam_slurm_adopt for SSH sessions.
+#
+# This allows SSH access to be restricted to users with active jobs on the node.
+# Ref: https://slurm.schedmd.com/pam_slurm_adopt.html#PAM_CONFIG
+function configure_pam_slurm() {
+	# Add pam_slurm_adopt to SSH PAM configuration if not already present
+	if grep -q "pam_slurm_adopt.so" /etc/pam.d/sshd 2>/dev/null; then
+		return
+	fi
+	# Insert pam_slurm_adopt BEFORE account include password-auth
+	# This is critical because password-auth contains "sufficient pam_localuser.so"
+	# which would short-circuit the PAM stack for local users, bypassing pam_slurm_adopt
+	local search_line="account[[:space:]]*include[[:space:]]*password-auth"
+	local pam_slurm_adopt="account    required     pam_slurm_adopt.so"
+	sed -i "s|^${search_line}|${pam_slurm_adopt} ${PAM_SLURM_ADOPT_OPTIONS}\n&|" /etc/pam.d/sshd
+}
+
 function main() {
 	mkdir -p /run/slurm/
 	mkdir -p /var/spool/slurmd/
+	mkdir -p /run/sshd/
+	chmod 0755 /run/sshd/
+	mkdir -p /run/slurm/
 
+	ssh-keygen -A
+	configure_pam_slurm
+
+	# Ref: https://slurm.schedmd.com/slurm.conf.html#OPT_CoreSpecCount
 	local coreSpecCount=0
 	if ((POD_CPUS > 0)); then
 		coreSpecCount="$(calculateCoreSpecCount)"
@@ -106,6 +137,7 @@ function main() {
 		addConfItem "CoreSpecCount=${coreSpecCount}"
 	fi
 
+	# Ref: https://slurm.schedmd.com/slurm.conf.html#OPT_MemSpecLimit
 	local memSpecLimit=0
 	if ((POD_MEMORY > 0)); then
 		memSpecLimit="$(calculateMemSpecLimit)"

@@ -5,29 +5,28 @@
 ################################################################################
 
 ARG SLURM_VERSION=master
+ARG SLURM_VERSION_MICRO=1
 ARG SLURM_DIR=slurm
-ARG PARENT_IMAGE=rockylinux:9
+ARG PARENT_IMAGE=rockylinux/rockylinux:9
 
 ################################################################################
 FROM alpine:latest AS slurm-src
 
 ARG SLURM_VERSION
+ARG SLURM_VERSION_MICRO
 ARG SLURM_DIR
-ARG SLURM_TAR="${SLURM_VERSION}"
+ARG SLURM_TAR="${SLURM_VERSION}.tar.gz"
 
 WORKDIR /workspace/
 
-ADD https://github.com/SchedMD/slurm/archive/${SLURM_TAR}.tar.gz ${SLURM_VERSION}.tar.gz
+RUN apk add -q --no-cache tar
 
-RUN --mount=type=cache,target=/var/cache/apk,sharing=locked <<EOR
-# Unpack Slurm Source
-set -xeuo pipefail
-apk upgrade -q --update-cache
-apk add -q tar
-mkdir -p ${SLURM_DIR}
-tar --strip-components=1 -zxvf ${SLURM_TAR}.tar.gz -C ${SLURM_DIR}
-rm ${SLURM_TAR}.tar.gz
-EOR
+ADD https://github.com/SchedMD/slurm/archive/${SLURM_TAR} ${SLURM_TAR}
+
+RUN \
+  mkdir -p ${SLURM_DIR} && \
+  tar --strip-components=1 -zxvf ${SLURM_TAR} -C ${SLURM_DIR} && \
+  rm ${SLURM_TAR}
 
 ################################################################################
 FROM ${PARENT_IMAGE} AS build
@@ -41,24 +40,28 @@ ARG SLURM_DIR
 USER root
 WORKDIR /tmp/
 
+RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked <<EOR
+# Pre-Build Slurm
+set -xeuo pipefail
+dnf -q -y install --setopt='install_weak_deps=False' \
+  '@Development' dnf-utils rpm-build 'dnf-command(builddep)' 'dnf-command(config-manager)' epel-release
+dnf -q config-manager --enable crb
+dnf -q -y upgrade
+EOR
+
 COPY --from=slurm-src /workspace/${SLURM_DIR} ${SLURM_DIR}
 
 # Ref: https://slurm.schedmd.com/quickstart_admin.html#rpmbuild
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked <<EOR
 # Build Slurm
 set -xeuo pipefail
-dnf -q -y install --setopt='install_weak_deps=False' \
-  '@Development' rpm-build 'dnf-command(builddep)' 'dnf-command(config-manager)' epel-release
-dnf -q config-manager --enable crb
-dnf -q -y upgrade
-## Build
 SLURM_RPM_DIR="$(rpmspec -q ${SLURM_DIR}/slurm.spec 2> /dev/null | grep -Eo "slurm-[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+(-[[:alnum:]]+)?" | head -n1 | sed -E 's/-[[:digit:]]+$//g')"
 if [ "${SLURM_DIR}" != "$SLURM_RPM_DIR" ]; then
   mv ${SLURM_DIR} $SLURM_RPM_DIR
 fi
 rm -f ${SLURM_RPM_DIR}.tar.bz2
 tar -caf ${SLURM_RPM_DIR}.tar.bz2 $SLURM_RPM_DIR
-dnf -q -y builddep \
+dnf -y builddep \
   -D '_with_cgroupv2 1' \
   -D '_with_slurmrestd 1' \
   -D '_with_jwt 1' \
@@ -72,7 +75,7 @@ dnf -q -y builddep \
   -D '_with_hdf5 yes' \
   -D '_with_libcurl yes' \
   -D '_enable_debug 1' \
-  ${SLURM_RPM_DIR}/slurm.spec
+  ${SLURM_RPM_DIR}/slurm.spec >/dev/null
 ## FIXME: remove package installations after RPM spec makes them dependencies: --with-hdf5
 dnf -q -y install --setopt='install_weak_deps=False' \
   hdf5-devel
@@ -183,6 +186,8 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked <<EOR
 set -xeuo pipefail
 dnf -q -y install --setopt='install_weak_deps=False' \
   gawk socat \
+  openssh-server \
+  authselect sssd sssd-ad sssd-ldap \
   ./slurm-devel-[0-9]*.rpm \
   ./slurm-libpmi-[0-9]*.rpm \
   ./slurm-pam_slurm-[0-9]*.rpm \
@@ -191,20 +196,24 @@ dnf -q -y install --setopt='install_weak_deps=False' \
 rm *.rpm
 # Configure
 mkdir -p /var/spool/slurmd/
-cp -v /etc/nsswitch.conf{,.bak}
 sed -i -E "s/^passwd:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
 sed -i -E "s/^group:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
+mkdir -p /etc/authselect
+authselect select sssd with-mkhomedir --force
+rm -f /etc/ssh/ssh_host_*
 EOR
 
 COPY files/etc/supervisord.conf /etc/
 COPY \
-  files/etc/supervisord.d/slurmd.ini \
   files/etc/supervisord.d/fakesystemd.ini \
+  files/etc/supervisord.d/slurmd.ini \
+  files/etc/supervisord.d/sshd.ini \
+  files/etc/supervisord.d/sssd.ini \
   /etc/supervisord.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
-EXPOSE 6818/tcp
+EXPOSE 6818/tcp 22/tcp
 ENTRYPOINT ["entrypoint.sh"]
 
 ################################################################################
@@ -293,7 +302,7 @@ EOR
 COPY files/etc/supervisord.conf /etc/
 COPY \
   files/etc/supervisord.d/sackd.ini \
-  files/etc/supervisord.d/fakesystemd.ini \
+  files/etc/supervisord.d/fakesystemd-slurm.ini \
   /etc/supervisord.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -315,9 +324,7 @@ set -xeuo pipefail
 dnf -q -y install --setopt='install_weak_deps=False' \
   socat \
   openssh-server \
-  dbus-daemon \
-  oddjob-mkhomedir \
-  authselect sssd sssd-ad sssd-ldap sssd-dbus
+  authselect sssd sssd-ad sssd-ldap
 # Configure
 mkdir -p /etc/authselect
 authselect select sssd with-mkhomedir --force
@@ -326,9 +333,7 @@ EOR
 
 COPY files/etc/supervisord.conf /etc/
 COPY \
-  files/etc/supervisord.d/dbus.ini \
-  files/etc/supervisord.d/fakesystemd.ini \
-  files/etc/supervisord.d/oddjobd.ini \
+  files/etc/supervisord.d/fakesystemd-slurm.ini \
   files/etc/supervisord.d/sackd.ini \
   files/etc/supervisord.d/sshd.ini \
   files/etc/supervisord.d/sssd.ini \

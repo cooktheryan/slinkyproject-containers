@@ -14,6 +14,7 @@
   - [Multiple Architectures](#multiple-architectures)
     - [Emulation (QEMU)](#emulation-qemu)
     - [Multiple Native Nodes](#multiple-native-nodes)
+  - [Extending the images with additional software](#extending-the-images-with-additional-software)
 
 <!-- mdformat-toc end -->
 
@@ -32,17 +33,17 @@ Instructions for building images via [docker bake].
 Build Slurm from the selected Slurm version and Linux flavor.
 
 ```sh
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 docker bake $BAKE_IMPORTS --print
 docker bake $BAKE_IMPORTS
 ```
 
-For example, the following will build Slurm 25.05 on Rocky Linux 9.
+For example, the following will build Slurm 25.11 on Rocky Linux 9.
 
 ```sh
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./25.05/rockylinux9/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./25.11/rockylinux9/slurm.hcl"
 docker bake $BAKE_IMPORTS --print
 docker bake $BAKE_IMPORTS
 ```
@@ -62,8 +63,8 @@ Build Slurm from the selected Slurm version and Linux flavor.
 
 ```sh
 export REGISTRY="my/registry"
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 docker bake $BAKE_IMPORTS --print
 docker bake $BAKE_IMPORTS
 ```
@@ -87,8 +88,8 @@ Build Slurm from the selected Slurm version and Linux flavor.
 ```sh
 export GIT_REPO=git@github.com:SchedMD/slurm.git
 export GIT_BRANCH=master
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 docker bake $BAKE_IMPORTS dev --print
 docker bake $BAKE_IMPORTS dev
 ```
@@ -98,8 +99,8 @@ docker bake $BAKE_IMPORTS dev
 Build Slurm images with the `multiarch` target:
 
 ```sh
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 docker bake $BAKE_IMPORTS multiarch --print
 docker bake $BAKE_IMPORTS multiarch
 ```
@@ -142,8 +143,8 @@ docker buildx inspect multiarch
 Build Slurm images:
 
 ```sh
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 docker bake $BAKE_IMPORTS --builder multiarch multiarch --print
 docker bake $BAKE_IMPORTS --builder multiarch multiarch
 ```
@@ -167,10 +168,48 @@ docker buildx create --name multiarch --append node-arm64
 Build Slurm images:
 
 ```sh
-export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./$VERSION/$FLAVOR/slurm.hcl"
 docker bake $BAKE_IMPORTS --builder multiarch multiarch --print
 docker bake $BAKE_IMPORTS --builder multiarch multiarch
+```
+
+## Extending the images with additional software
+
+Image build stages may also be added or modified to manage custom software
+present in images. It is generally advisible to keep the size and complexity of
+each stage minimal, in order to reduce image build time and improve the number
+of stages that can be re-used between builds. Furthermore, changes should be
+made in the most specific stage possible. For example, installing JupyterLab for
+users should be done in a layer that is specific to the `slurmd` or `login`
+targets, so that it is not installed unnecessarily in `slurmctld` or `slurmdbd`
+images, increasing image size.
+
+The following is an example of how the `base-extra` stage could be modified for
+the installation of additional software, specifically PyTorch and JupyterLab:
+
+```dockerfile
+FROM base AS base-extra
+
+SHELL ["bash", "-c"]
+
+RUN  --mount=type=cache,target=/var/cache/dnf,sharing=locked <<EOR
+# Install Extra Packages
+set -xeuo pipefail
+dnf -q -y install \
+    python3 \
+    python3-pip
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+EOR
+```
+
+After modifying the `base-extra` layer, build the `slurmd` and `login` images:
+
+```bash
+cd ./schedmd/slurm/
+export BAKE_IMPORTS="--file ./docker-bake.hcl --file ./25.05/rockylinux9/slurm.hcl"
+docker bake $BAKE_IMPORTS slurmd login --print
+docker bake $BAKE_IMPORTS slurmd login
 ```
 
 <!-- Links -->
